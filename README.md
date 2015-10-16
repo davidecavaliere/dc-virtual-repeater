@@ -1,81 +1,161 @@
-# Angular Express Seed
+# Angular Virtual Repeater
 
-Start an awesome app with AngularJS on the front, Express + Node on the back. This project is an
-application skeleton for a typical [AngularJS](http://angularjs.org/) web app for those who want
-to use Node to serve their app.
+I used to develop with the [vaadin framework](http://https://vaadin.com/home). It has a cool component called TableContainer (or something similar). The point is that this component has a lazy loading interface. It work with the following logic. What it does is to ask to the server only the elements that need to be shown are actually visible in the table.
 
-The seed contains angular libraries, test libraries and a bunch of scripts all preconfigured for
-instant web development gratification. Just clone the repo (or download the zip/tarball) and
-you're ready to develop your application.
+Lately I'm working a lot with javascript and angularjs. I'm also working witha [angular-material](http://material.angular.com) and I found the [virtual divider component](https://material.angularjs.org/latest/#/demo/material.components.virtualRepeat). Which pretty amazing so I thought what a cool feature would be if I could load just the element actually visible in the repeater.
 
-The seed app shows how to wire together Angular client-side components with Express on the server.
-It also illustrates writing angular partials/views with the Jade templating library.
+This is where I ended up.
 
-_Note: Although Jade supports interpolation, you should be doing that mostly on the client. Mixing
-server and browser templating will convolute your app. Instead, use Jade as a syntactic sugar for
-HTML, and let AngularJS take care of interpolation on the browser side._
+Let's imagine the following scenario.
+```html
+<!-- the view -->
 
-## How to use angular-express-seed
+<p>
+  Total Things : {{count.total}}
+</p>
+<div class="virtualRepeatdemoVerticalUsage">
+  <md-virtual-repeat-container id="vertical-container">
+    <div md-virtual-repeat="item in items"
+        class="repeated-item" flex>
+      {{$index}} : {{item.name}}
+    </div>
+  </md-virtual-repeat-container>
+</div>
 
-Clone the angular-express-seed repository, run `npm install` to grab the dependencies, and start hacking!
+```
 
-### Running the app
+```javascript
+// controller
 
-Runs like a typical express app:
+.controller('VirtualRepeaterDemoCtrl', function ($scope, $log, ThingFactory) {
 
-    node app.js
+  $scope.count = ThingFactory.count();
+  $scope.items = [];
 
-### Running tests
+  $scope.count.$promise.then(function(count) {
 
-Coming soon!
+    for (var i = 0; i < $scope.count.total; i++) {
+      $scope.items.push(new ThingFactory());
+    }
 
-### Receiving updates from upstream
+});
 
-Just fetch the changes and merge them into your project with git.
+```
+
+where ThingFactory is
+
+```javascript
+.factory('ThingFactory', function($log, $resource) {
+  return $resource('/api/things/:id', { id : '@_id'}, {
+    count : {
+      url : '/api/things/count/:query',
+      params : { query : {} }
+    },
+    getByIndex : {
+      url : 'api/things/skip/:skip/limit/:limit',
+      params : {limit : 1},
+      transformResponse : function(data) {
+        return angular.fromJson(data)[0];
+      }
+    }
+  });
+})
+
+```
+
+Please note that the function getByIndex is crucial for the lazy loading feauture to work.
+
+Server side will have something like
+
+```javascript
+// thing.index.js
+var express = require('express');
+var controller = require('./thing.controller');
+
+var router = express.Router();
+
+router.get('/skip/:skip/limit/:limit', getByIndex);
+router.get('/count/:query', controller.count);
+```
+
+```javascript
+//thing.controller.js
+exports.count = function(req, res) {
+  var query = req.params.query;
+  Thing.count({}, function(err, count) {
+    if (err) { return handleError(res, err); }
+    return res.json({total : count});
+  });
+}
+
+exports.getByIndex = function(req, res) {
+  Thing.find({}, null, { skip : req.params.skip, limit : req.params.limit}, function(err, thing) {
+    if(err) { return handleError(res, err); }
+    return res.json(thing);
+  });
+}
+
+```
+
+A now with a little hack on the the virtual repeat directive...
+
+```
+diff --git a/src/components/virtualRepeat/virtual-repeater.js b/src/components/virtualRepeat/virtual-repeater.js
+index 4d5888f..e84b3af 100644
+--- a/src/components/virtualRepeat/virtual-repeater.js
++++ b/src/components/virtualRepeat/virtual-repeater.js
+@@ -349,13 +349,14 @@ function VirtualRepeatDirective($parse) {
 
 
-## Directory Layout
-    
-    app.js              --> app config
-    package.json        --> for npm
-    public/             --> all of the files to be used in on the client side
-      css/              --> css files
-        app.css         --> default stylesheet
-      img/              --> image files
-      js/               --> javascript files
-        app.js          --> declare top-level app module
-        controllers.js  --> application controllers
-        directives.js   --> custom angular directives
-        filters.js      --> custom angular filters
-        services.js     --> custom angular services
-        lib/            --> angular and 3rd party JavaScript libraries
-          angular/
-            angular.js            --> the latest angular js
-            angular.min.js        --> the latest minified angular js
-            angular-*.js          --> angular add-on modules
-            version.txt           --> version number
-    routes/
-      api.js            --> route for serving JSON
-      index.js          --> route for serving HTML pages and partials
-    views/
-      index.jade        --> main page for app
-      layout.jade       --> doctype, title, head boilerplate
-      partials/         --> angular view partials (partial jade templates)
-        partial1.jade
-        partial2.jade
+ /** @ngInject */
+-function VirtualRepeatController($scope, $element, $attrs, $browser, $document, $$rAF) {
++function VirtualRepeatController($scope, $element, $attrs, $browser, $document, $$rAF, $mdUtil) {
+   this.$scope = $scope;
+   this.$element = $element;
+   this.$attrs = $attrs;
+   this.$browser = $browser;
+   this.$document = $document;
+   this.$$rAF = $$rAF;
++  this.$mdUtil = $mdUtil;
 
+   /** @type {boolean} Whether we are in on-demand mode. */
+   this.onDemand = $attrs.hasOwnProperty('mdOnDemand');
+@@ -656,12 +657,33 @@ VirtualRepeatController.prototype.getBlock_ = function(index) {
+  * @private
+  */
+ VirtualRepeatController.prototype.updateBlock_ = function(block, index) {
++  var item = block.scope.item;
++
++  // TODO we need to figure out if item
++  // is an instance of Resource (ngResource)
++  if (angular.isFunction(item.$getByIndex)) {
++    // check if resource is already resolved
++
++    var callService = function(index) {
++      item.$getByIndex({ skip : index });
++    };
++
++    if (angular.isDefined(item.$resolved) && item.$resolved) {
++      // TODO set timeout to refresh element even if is resolved
++    } else {
++      // TODO should calculate this value on an estimation of latency of the server
++      var latency = 500;
++      this.$mdUtil.debounce(callService, latency)(index);
++    }
++  }
++
+   this.blocks[index] = block;
 
+   if (!block.new &&
+       (block.scope.$index === index && block.scope[this.repeatName] === this.items[index])) {
+     return;
+   }
++
+   block.new = false;
 
-## Example App
+   // Update and digest the block's scope.
+```
 
-A simple [blog](https://github.com/btford/angular-express-blog) based on this seed.
+Code is available in this fork of the [angular material repo](https://github.com/davidecavaliere/material/tree/lazy_loading)
 
-
-## Contact
-
-For more information on AngularJS please check out http://angularjs.org/
-For more on Express and Jade, http://expressjs.com/ and http://jade-lang.com/ are
-your friends.
-
-## License
-MIT
+Instead of hacking the directive like that you can override the ``function VirtualRepeatController`` and the ``VirtualRepeatController.prototype.updateBlock_`` function to change their behaviour redefining them in any js file.
